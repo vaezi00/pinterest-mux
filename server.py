@@ -12,7 +12,8 @@ import tempfile
 from urllib.parse import urlparse, parse_qs
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-
+def log(*args):
+    print("[MUX]", *args, flush=True)
 # ═══════════════════════════════════════════════════════════════════
 # CONFIG
 # ═══════════════════════════════════════════════════════════════════
