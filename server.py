@@ -570,146 +570,233 @@ class MuxHandler(BaseHTTPRequestHandler):
         source_hls,
         head_only=False,
     ):
-        temp_path = None
+        temp_frag = None
+        temp_final = None
         response_started = False
-
+    
         try:
-
-            # ───────────────────────────────────────────────────────
-            # فایل موقت روی خود Render
-            #
-            # روی PC یا Cloudflare ذخیره نمی‌شود.
-            # ───────────────────────────────────────────────────────
-
-            tmp = tempfile.NamedTemporaryFile(
-                prefix="mux_",
+            # ═══════════════════════════════════════════════════════
+            # TEMP FILES
+            # ═══════════════════════════════════════════════════════
+    
+            fd, temp_frag = tempfile.mkstemp(
+                prefix="mux_frag_",
                 suffix=".mp4",
                 dir="/tmp",
-                delete=False,
             )
+            os.close(fd)
+            os.remove(temp_frag)
 
-            temp_path = tmp.name
-
-            tmp.close()
-
+            fd, temp_final = tempfile.mkstemp(
+                prefix="mux_final_",
+                suffix=".mp4",
+                dir="/tmp",
+            )
+            os.close(fd)
+            os.remove(temp_final)
+    
             log(
-                "FFmpeg output file:",
-                temp_path,
+                "Fragmented MP4:",
+                temp_frag,
             )
-
-            # ───────────────────────────────────────────────────────
-            # FFMPEG
+    
+            log(
+                "Final MP4:",
+                temp_final,
+            )
+    
+            headers = (
+                "User-Agent: "
+                f"{USER_AGENT}\r\n"
+                "Referer: https://www.pinterest.com/\r\n"
+                "Origin: https://www.pinterest.com\r\n"
+            )
+    
+            # ═══════════════════════════════════════════════════════
+            # PASS 1
             #
-            # خروجی کامل MP4 روی فایل ساخته می‌شود.
+            # HLS → Fragmented MP4
             #
-            # +faststart باعث می‌شود moov در ابتدای فایل قرار گیرد.
-            # ───────────────────────────────────────────────────────
-
-            cmd = [
+            # این همان نوع خروجی‌ای است که قبلاً روی Render کار می‌کرد.
+            # ═══════════════════════════════════════════════════════
+    
+            cmd1 = [
                 "ffmpeg",
-
+    
                 "-hide_banner",
-
                 "-loglevel",
                 "error",
-
+    
                 "-rw_timeout",
                 "30000000",
-
+    
                 "-headers",
-                (
-                    "User-Agent: "
-                    f"{USER_AGENT}\r\n"
-                    "Referer: "
-                    "https://www.pinterest.com/\r\n"
-                    "Origin: "
-                    "https://www.pinterest.com\r\n"
-                ),
-
+                headers,
+    
                 "-i",
                 source_hls,
-
+    
                 "-map",
                 "0:v:0",
-
+    
                 "-map",
                 "0:a:0?",
-
+    
                 "-c:v",
                 "copy",
-
+    
                 "-c:a",
                 "copy",
-
+    
                 "-movflags",
-                "+faststart",
-
-                "-shortest",
-
+                "+frag_keyframe+empty_moov+default_base_moof",
+    
                 "-f",
                 "mp4",
-
-                temp_path,
+    
+                temp_frag,
             ]
-
+    
             log(
-                "Starting FFmpeg..."
+                "FFmpeg pass 1 starting..."
             )
-
-            result = subprocess.run(
-                cmd,
+    
+            result1 = subprocess.run(
+                cmd1,
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.PIPE,
                 text=True,
             )
-
-            # ───────────────────────────────────────────────────────
-            # FFMPEG ERROR
-            # ───────────────────────────────────────────────────────
-
-            if result.returncode != 0:
-
-                error_text = (
-                    result.stderr.strip()
-                    if result.stderr
-                    else "ffmpeg_failed"
-                )
-
+    
+            if result1.stderr:
                 log(
-                    "FFmpeg failed:",
-                    error_text[:2000],
+                    "FFmpeg pass 1 stderr:",
+                    result1.stderr[:3000],
                 )
-
-                send_json(
-                    self,
-                    502,
-                    {
-                        "ok": False,
-                        "error": "ffmpeg_failed",
-                        "details": error_text[:1000],
-                    },
+    
+            if result1.returncode != 0:
+                raise RuntimeError(
+                    "ffmpeg_pass1_failed: "
+                    + (
+                        result1.stderr.strip()
+                        if result1.stderr
+                        else "unknown"
+                    )
                 )
-
-                response_started = True
-
-                return
-
-            # ───────────────────────────────────────────────────────
-            # FFPROBE
+    
+            frag_size = os.path.getsize(
+                temp_frag
+            )
+    
+            log(
+                "Pass 1 completed:",
+                frag_size,
+                "bytes",
+            )
+    
+            if frag_size <= 0:
+                raise RuntimeError(
+                    "ffmpeg_pass1_empty_output"
+                )
+    
+            # ═══════════════════════════════════════════════════════
+            # PASS 2
             #
-            # برای فهمیدن duration واقعی فایل.
-            # ───────────────────────────────────────────────────────
-
+            # Fragmented MP4 → استاندارد MP4
+            #
+            # این مرحله moov واقعی را می‌سازد.
+            # ═══════════════════════════════════════════════════════
+    
+            cmd2 = [
+                "ffmpeg",
+    
+                "-hide_banner",
+                "-loglevel",
+                "error",
+    
+                "-i",
+                temp_frag,
+    
+                "-map",
+                "0:v:0",
+    
+                "-map",
+                "0:a:0?",
+    
+                "-c:v",
+                "copy",
+    
+                "-c:a",
+                "copy",
+    
+                "-avoid_negative_ts",
+                "make_zero",
+    
+                "-movflags",
+                "+faststart",
+    
+                "-f",
+                "mp4",
+    
+                temp_final,
+            ]
+    
+            log(
+                "FFmpeg pass 2 starting..."
+            )
+    
+            result2 = subprocess.run(
+                cmd2,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.PIPE,
+                text=True,
+            )
+    
+            if result2.stderr:
+                log(
+                    "FFmpeg pass 2 stderr:",
+                    result2.stderr[:3000],
+                )
+    
+            if result2.returncode != 0:
+                raise RuntimeError(
+                    "ffmpeg_pass2_failed: "
+                    + (
+                        result2.stderr.strip()
+                        if result2.stderr
+                        else "unknown"
+                    )
+                )
+    
+            final_size = os.path.getsize(
+                temp_final
+            )
+    
+            log(
+                "Pass 2 completed:",
+                final_size,
+                "bytes",
+            )
+    
+            if final_size <= 0:
+                raise RuntimeError(
+                    "ffmpeg_pass2_empty_output"
+                )
+    
+            # ═══════════════════════════════════════════════════════
+            # FFPROBE FINAL MP4
+            # ═══════════════════════════════════════════════════════
+    
             probe = subprocess.run(
                 [
                     "ffprobe",
-
+    
                     "-v",
                     "error",
-
+    
                     "-show_entries",
                     "format=duration,size",
-
+    
                     "-show_entries",
                     (
                         "stream="
@@ -719,179 +806,132 @@ class MuxHandler(BaseHTTPRequestHandler):
                         "time_base,"
                         "start_time"
                     ),
-
+    
                     "-of",
                     "json",
-
-                    temp_path,
+    
+                    temp_final,
                 ],
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 text=True,
             )
-
+    
             log(
-                "FFPROBE:",
+                "FFPROBE FINAL:",
                 probe.stdout[:5000],
             )
-
+    
             if probe.returncode != 0:
-
                 log(
-                    "FFPROBE ERROR:",
+                    "FFPROBE FINAL ERROR:",
                     probe.stderr[:2000],
                 )
-
-            # ───────────────────────────────────────────────────────
-            # FINAL FILE SIZE
-            # ───────────────────────────────────────────────────────
-
-            try:
-
-                file_size = os.path.getsize(
-                    temp_path
-                )
-
-            except Exception:
-
-                file_size = 0
-
-            if file_size <= 0:
-
-                raise RuntimeError(
-                    "mux_output_empty"
-                )
-
-            log(
-                "FFmpeg completed:",
-                file_size,
-                "bytes",
-            )
-
-            # ───────────────────────────────────────────────────────
+    
+            # ═══════════════════════════════════════════════════════
             # HTTP RESPONSE
-            #
-            # فایل کامل است و Content-Length واقعی دارد.
-            # ───────────────────────────────────────────────────────
-
+            # ═══════════════════════════════════════════════════════
+    
             self.send_response(200)
-
+    
             self.send_header(
                 "Content-Type",
                 "video/mp4",
             )
-
+    
             self.send_header(
                 "Content-Length",
-                str(file_size),
+                str(final_size),
             )
-
+    
             self.send_header(
                 "Content-Disposition",
                 'inline; filename="video.mp4"',
             )
-
+    
             self.send_header(
                 "Cache-Control",
                 "no-store",
             )
-
+    
             self.end_headers()
-
+    
             response_started = True
-
-            # ───────────────────────────────────────────────────────
+    
+            # ═══════════════════════════════════════════════════════
             # HEAD
-            # ───────────────────────────────────────────────────────
-
+            # ═══════════════════════════════════════════════════════
+    
             if head_only:
-
                 log(
-                    "HEAD request completed:",
-                    file_size,
+                    "HEAD completed:",
+                    final_size,
                     "bytes",
                 )
-
                 return
-
-            # ───────────────────────────────────────────────────────
-            # STREAM COMPLETE FILE
-            # ───────────────────────────────────────────────────────
-
+    
+            # ═══════════════════════════════════════════════════════
+            # STREAM FINAL MP4
+            # ═══════════════════════════════════════════════════════
+    
             total_sent = 0
-
+    
             with open(
-                temp_path,
+                temp_final,
                 "rb",
             ) as f:
-
+    
                 while True:
-
                     chunk = f.read(
                         1024 * 1024
                     )
-
+    
                     if not chunk:
                         break
-
+    
                     try:
-
                         self.wfile.write(
                             chunk
                         )
-
+    
                         self.wfile.flush()
-
+    
                         total_sent += len(
                             chunk
                         )
-
+    
                     except (
                         BrokenPipeError,
                         ConnectionResetError,
                     ):
-
                         log(
-                            "Client disconnected "
-                            "during mux download"
+                            "Client disconnected during "
+                            "final MP4 stream"
                         )
-
                         break
-
+    
             log(
                 "HTTP stream completed:",
                 total_sent,
                 "bytes",
             )
-
-        # ───────────────────────────────────────────────────────────
-        # CLIENT DISCONNECTED
-        # ───────────────────────────────────────────────────────────
-
+    
         except (
             BrokenPipeError,
             ConnectionResetError,
         ):
-
             log(
                 "Client disconnected"
             )
-
-        # ───────────────────────────────────────────────────────────
-        # OTHER ERROR
-        # ───────────────────────────────────────────────────────────
-
+    
         except Exception as e:
-
             log(
                 "stream_mux failed:",
                 repr(e),
             )
-
+    
             if not response_started:
-
                 try:
-
                     send_json(
                         self,
                         500,
@@ -900,39 +940,38 @@ class MuxHandler(BaseHTTPRequestHandler):
                             "error": str(e),
                         },
                     )
-
                 except Exception:
                     pass
-
+    
         finally:
-
-            # ───────────────────────────────────────────────────────
-            # حذف فایل موقت
-            # ───────────────────────────────────────────────────────
-
-            if temp_path:
-
+            # ═══════════════════════════════════════════════════════
+            # CLEANUP
+            # ═══════════════════════════════════════════════════════
+    
+            for path in (
+                temp_frag,
+                temp_final,
+            ):
+                if not path:
+                    continue
+    
                 try:
-
-                    os.remove(
-                        temp_path
-                    )
-
+                    os.remove(path)
+    
                     log(
-                        "Temp mux file removed:",
-                        temp_path,
+                        "Temp file removed:",
+                        path,
                     )
-
+    
                 except FileNotFoundError:
                     pass
-
+    
                 except Exception as e:
-
                     log(
-                        "Temp file cleanup failed:",
+                        "Temp cleanup failed:",
+                        path,
                         repr(e),
                     )
-
 
 # ═══════════════════════════════════════════════════════════════════
 # MAIN
