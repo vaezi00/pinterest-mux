@@ -7,18 +7,30 @@ import threading
 import json
 import urllib.request
 import urllib.error
+
 from urllib.parse import urlparse, parse_qs
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 
-RENDER_API_KEY = os.environ.get("RENDER_API_KEY", "").strip()
-RENDER_SERVICE_ID = os.environ.get("RENDER_SERVICE_ID", "").strip()
+# ═══════════════════════════════════════════════════════════════════
+# CONFIG
+# ═══════════════════════════════════════════════════════════════════
+
+PORT = int(os.environ.get("PORT", "10000"))
+
+MUX_SECRET = os.environ.get("MUX_SECRET", "").strip()
+
+RENDER_API_KEY = os.environ.get(
+    "RENDER_API_KEY",
+    "",
+).strip()
+
+RENDER_SERVICE_ID = os.environ.get(
+    "RENDER_SERVICE_ID",
+    "",
+).strip()
 
 SUSPEND_DELAY_SECONDS = 10
-
-_active_mux_requests = 0
-_active_mux_lock = threading.Lock()
-_suspend_timer = None
 
 ALLOWED_HOSTS = {
     "i.pinimg.com",
@@ -37,6 +49,21 @@ USER_AGENT = (
 )
 
 
+# ═══════════════════════════════════════════════════════════════════
+# STATE
+# ═══════════════════════════════════════════════════════════════════
+
+_active_mux_requests = 0
+
+_active_mux_lock = threading.Lock()
+
+_suspend_timer = None
+
+
+# ═══════════════════════════════════════════════════════════════════
+# JSON RESPONSE
+# ═══════════════════════════════════════════════════════════════════
+
 def send_json(handler, status, data):
     body = json.dumps(
         data,
@@ -45,25 +72,36 @@ def send_json(handler, status, data):
     ).encode("utf-8")
 
     handler.send_response(status)
+
     handler.send_header(
         "Content-Type",
         "application/json; charset=utf-8",
     )
+
     handler.send_header(
         "Content-Length",
         str(len(body)),
     )
+
     handler.send_header(
         "Cache-Control",
         "no-store",
     )
+
     handler.end_headers()
 
     handler.wfile.write(body)
 
 
+# ═══════════════════════════════════════════════════════════════════
+# URL VALIDATION
+# ═══════════════════════════════════════════════════════════════════
+
 def is_allowed_hls_url(value):
-    if not value or len(value) > MAX_URL_LENGTH:
+    if not value:
+        return False
+
+    if len(value) > MAX_URL_LENGTH:
         return False
 
     try:
@@ -75,9 +113,7 @@ def is_allowed_hls_url(value):
         if u.hostname not in ALLOWED_HOSTS:
             return False
 
-        path = (u.path or "").lower()
-
-        if not path.endswith(".m3u8"):
+        if not (u.path or "").lower().endswith(".m3u8"):
             return False
 
         return True
@@ -85,6 +121,10 @@ def is_allowed_hls_url(value):
     except Exception:
         return False
 
+
+# ═══════════════════════════════════════════════════════════════════
+# HMAC
+# ═══════════════════════════════════════════════════════════════════
 
 def make_signature(source_url, exp):
     payload = f"{source_url}\n{exp}".encode("utf-8")
@@ -113,15 +153,28 @@ def verify_signature(source_url, exp_text, sig):
     if exp > now + MAX_TTL:
         return False
 
-    expected = make_signature(source_url, exp)
+    expected = make_signature(
+        source_url,
+        exp,
+    )
 
-    return hmac.compare_digest(expected, sig)
+    return hmac.compare_digest(
+        expected,
+        sig,
+    )
+
+
+# ═══════════════════════════════════════════════════════════════════
+# RENDER SUSPEND CONTROL
+# ═══════════════════════════════════════════════════════════════════
 
 def cancel_pending_suspend():
     global _suspend_timer
 
     with _active_mux_lock:
+
         if _suspend_timer is not None:
+
             try:
                 _suspend_timer.cancel()
             except Exception:
@@ -134,10 +187,12 @@ def schedule_suspend():
     global _suspend_timer
 
     with _active_mux_lock:
+
         if _active_mux_requests != 0:
             return
 
         if _suspend_timer is not None:
+
             try:
                 _suspend_timer.cancel()
             except Exception:
@@ -149,11 +204,13 @@ def schedule_suspend():
         )
 
         _suspend_timer.daemon = True
+
         _suspend_timer.start()
 
         print(
             f"[SUSPEND] Scheduled in "
-            f"{SUSPEND_DELAY_SECONDS}s"
+            f"{SUSPEND_DELAY_SECONDS}s",
+            flush=True,
         )
 
 
@@ -163,11 +220,13 @@ def mux_request_started():
     cancel_pending_suspend()
 
     with _active_mux_lock:
+
         _active_mux_requests += 1
 
         print(
             "[MUX] Active requests:",
             _active_mux_requests,
+            flush=True,
         )
 
 
@@ -175,44 +234,59 @@ def mux_request_finished():
     global _active_mux_requests
 
     with _active_mux_lock:
+
         _active_mux_requests = max(
             0,
             _active_mux_requests - 1,
         )
 
+        active = _active_mux_requests
+
         print(
             "[MUX] Active requests:",
-            _active_mux_requests,
+            active,
+            flush=True,
         )
 
-        if _active_mux_requests == 0:
-            schedule_suspend()
+    if active == 0:
+        schedule_suspend()
 
 
 def suspend_render_service():
     global _suspend_timer
 
     with _active_mux_lock:
+
         if _active_mux_requests != 0:
+
             print(
                 "[SUSPEND] Cancelled: "
-                "mux request still active"
+                "mux request still active",
+                flush=True,
             )
+
             _suspend_timer = None
+
             return
 
         _suspend_timer = None
 
     if not RENDER_API_KEY:
+
         print(
-            "[SUSPEND] RENDER_API_KEY missing"
+            "[SUSPEND] RENDER_API_KEY missing",
+            flush=True,
         )
+
         return
 
     if not RENDER_SERVICE_ID:
+
         print(
-            "[SUSPEND] RENDER_SERVICE_ID missing"
+            "[SUSPEND] RENDER_SERVICE_ID missing",
+            flush=True,
         )
+
         return
 
     api_url = (
@@ -231,19 +305,22 @@ def suspend_render_service():
         },
     )
 
-    print("[SUSPEND] Requesting Render suspend...")
+    print(
+        "[SUSPEND] Requesting Render suspend...",
+        flush=True,
+    )
 
     try:
+
         with urllib.request.urlopen(
             req,
             timeout=15,
         ) as res:
 
-            status = res.status
-
             print(
                 "[SUSPEND] Render response:",
-                status,
+                res.status,
+                flush=True,
             )
 
     except urllib.error.HTTPError as e:
@@ -262,6 +339,7 @@ def suspend_render_service():
             "[SUSPEND] HTTP error:",
             e.code,
             body[:500],
+            flush=True,
         )
 
     except Exception as e:
@@ -269,34 +347,50 @@ def suspend_render_service():
         print(
             "[SUSPEND] Request failed:",
             repr(e),
+            flush=True,
         )
+
+
+# ═══════════════════════════════════════════════════════════════════
+# HTTP HANDLER
+# ═══════════════════════════════════════════════════════════════════
+
 class MuxHandler(BaseHTTPRequestHandler):
 
     server_version = "PinterestMux/2.0"
 
     def log_message(self, fmt, *args):
         print(
-            f"[HTTP] {self.address_string()} - {fmt % args}"
+            f"[HTTP] "
+            f"{self.address_string()} - "
+            f"{fmt % args}",
+            flush=True,
         )
 
     def do_GET(self):
         self.handle_request()
 
     def do_HEAD(self):
-        self.handle_request(head_only=True)
+        self.handle_request(
+            head_only=True,
+        )
+
+    # ═══════════════════════════════════════════════════════════════
+    # ROUTER
+    # ═══════════════════════════════════════════════════════════════
 
     def handle_request(self, head_only=False):
-    
-        # هر درخواست جدید، suspend در انتظار را لغو می‌کند.
+
         cancel_pending_suspend()
-    
+
         parsed = urlparse(self.path)
 
-        # ─────────────────────────────────────────────
+        # ───────────────────────────────────────────────────────────
         # HEALTH
-        # ─────────────────────────────────────────────
+        # ───────────────────────────────────────────────────────────
 
         if parsed.path == "/health":
+
             send_json(
                 self,
                 200,
@@ -305,13 +399,15 @@ class MuxHandler(BaseHTTPRequestHandler):
                     "service": "pinterest-mux",
                 },
             )
+
             return
 
-        # ─────────────────────────────────────────────
-        # MUX
-        # ─────────────────────────────────────────────
+        # ───────────────────────────────────────────────────────────
+        # ONLY /mux
+        # ───────────────────────────────────────────────────────────
 
         if parsed.path != "/mux":
+
             send_json(
                 self,
                 404,
@@ -320,15 +416,34 @@ class MuxHandler(BaseHTTPRequestHandler):
                     "error": "not_found",
                 },
             )
+
             return
 
-        query = parse_qs(parsed.query)
+        query = parse_qs(
+            parsed.query,
+        )
 
-        source_url = query.get("source", [None])[0]
-        exp = query.get("exp", [None])[0]
-        sig = query.get("sig", [None])[0]
+        source_url = query.get(
+            "source",
+            [None],
+        )[0]
+
+        exp = query.get(
+            "exp",
+            [None],
+        )[0]
+
+        sig = query.get(
+            "sig",
+            [None],
+        )[0]
+
+        # ───────────────────────────────────────────────────────────
+        # VALIDATE SOURCE
+        # ───────────────────────────────────────────────────────────
 
         if not source_url:
+
             send_json(
                 self,
                 400,
@@ -337,9 +452,13 @@ class MuxHandler(BaseHTTPRequestHandler):
                     "error": "missing_source",
                 },
             )
+
             return
 
-        if not is_allowed_hls_url(source_url):
+        if not is_allowed_hls_url(
+            source_url
+        ):
+
             send_json(
                 self,
                 400,
@@ -348,9 +467,15 @@ class MuxHandler(BaseHTTPRequestHandler):
                     "error": "invalid_hls_url",
                 },
             )
+
             return
 
+        # ───────────────────────────────────────────────────────────
+        # VALIDATE SIGNATURE
+        # ───────────────────────────────────────────────────────────
+
         if not exp or not sig:
+
             send_json(
                 self,
                 401,
@@ -359,13 +484,15 @@ class MuxHandler(BaseHTTPRequestHandler):
                     "error": "missing_signature",
                 },
             )
-                    return
-        
+
+            return
+
         if not verify_signature(
             source_url,
             exp,
             sig,
         ):
+
             send_json(
                 self,
                 403,
@@ -374,18 +501,35 @@ class MuxHandler(BaseHTTPRequestHandler):
                     "error": "invalid_or_expired_signature",
                 },
             )
+
             return
-        
+
+        # ───────────────────────────────────────────────────────────
+        # MUX
+        # ───────────────────────────────────────────────────────────
+
         mux_request_started()
-        
+
         try:
+
             self.stream_mux(
                 source_url,
                 head_only=head_only,
             )
+
         finally:
-            mux_request_finished()        
-            def stream_mux(self, source_url, head_only=False):
+
+            mux_request_finished()
+
+    # ═══════════════════════════════════════════════════════════════
+    # FFMPEG
+    # ═══════════════════════════════════════════════════════════════
+
+    def stream_mux(
+        self,
+        source_url,
+        head_only=False,
+    ):
 
         headers = (
             f"User-Agent: {USER_AGENT}\r\n"
@@ -398,50 +542,67 @@ class MuxHandler(BaseHTTPRequestHandler):
             "ffmpeg",
 
             "-hide_banner",
-            "-loglevel", "error",
+            "-loglevel",
+            "error",
 
-            # HTTP timeout
-            "-rw_timeout", "30000000",
+            "-rw_timeout",
+            "30000000",
 
-            # HTTP headers for Pinterest
-            "-headers", headers,
+            "-headers",
+            headers,
 
-            # HLS master
-            "-i", source_url,
+            "-i",
+            source_url,
 
-            # Explicit streams
-            "-map", "0:v:0",
-            "-map", "0:a:0",
+            "-map",
+            "0:v:0",
 
-            # NO re-encoding
-            "-c:v", "copy",
-            "-c:a", "copy",
+            "-map",
+            "0:a:0",
 
-            # Fragmented MP4 for HTTP streaming
+            "-c:v",
+            "copy",
+
+            "-c:a",
+            "copy",
+
             "-movflags",
             "+frag_keyframe+empty_moov+default_base_moof",
 
             "-shortest",
 
-            # stdout
-            "-f", "mp4",
+            "-f",
+            "mp4",
+
             "pipe:1",
         ]
 
-        print("[MUX] Starting FFmpeg")
-        print("[MUX] Source:", source_url)
+        print(
+            "[MUX] Starting FFmpeg",
+            flush=True,
+        )
+
+        print(
+            "[MUX] Source:",
+            source_url,
+            flush=True,
+        )
 
         try:
+
             process = subprocess.Popen(
                 cmd,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 bufsize=0,
             )
+
         except Exception as exc:
+
             print(
                 "[MUX] FFmpeg start failed:",
                 repr(exc),
+                flush=True,
             )
 
             send_json(
@@ -452,13 +613,22 @@ class MuxHandler(BaseHTTPRequestHandler):
                     "error": "ffmpeg_start_failed",
                 },
             )
+
             return
 
-        # stderr را جداگانه بخوان
+        # ───────────────────────────────────────────────────────────
+        # FFmpeg STDERR
+        # ───────────────────────────────────────────────────────────
+
         def drain_stderr():
+
             try:
+
                 while True:
-                    line = process.stderr.readline()
+
+                    line = (
+                        process.stderr.readline()
+                    )
 
                     if not line:
                         break
@@ -469,7 +639,12 @@ class MuxHandler(BaseHTTPRequestHandler):
                     ).strip()
 
                     if text:
-                        print("[FFmpeg]", text)
+
+                        print(
+                            "[FFmpeg]",
+                            text,
+                            flush=True,
+                        )
 
             except Exception:
                 pass
@@ -479,22 +654,28 @@ class MuxHandler(BaseHTTPRequestHandler):
             daemon=True,
         ).start()
 
+        # ───────────────────────────────────────────────────────────
+        # READ / STREAM
+        # ───────────────────────────────────────────────────────────
+
         try:
 
-            # اولین chunk
-            first_chunk = process.stdout.read(
-                64 * 1024
+            first_chunk = (
+                process.stdout.read(
+                    64 * 1024
+                )
             )
 
             if not first_chunk:
 
                 return_code = process.wait(
-                    timeout=20
+                    timeout=20,
                 )
 
                 print(
-                    "[MUX] No output. FFmpeg exit:",
-                    return_code,
+                    "[MUX] No output. "
+                    f"FFmpeg exit: {return_code}",
+                    flush=True,
                 )
 
                 send_json(
@@ -509,7 +690,10 @@ class MuxHandler(BaseHTTPRequestHandler):
 
                 return
 
-            # HEAD فقط برای تست
+            # ───────────────────────────────────────────────────────
+            # HTTP HEADERS
+            # ───────────────────────────────────────────────────────
+
             self.send_response(200)
 
             self.send_header(
@@ -527,41 +711,58 @@ class MuxHandler(BaseHTTPRequestHandler):
                 'inline; filename="pinterest.mp4"',
             )
 
-            # حجم نهایی از قبل معلوم نیست
-            # بنابراین Content-Length نمی‌فرستیم.
-
             self.end_headers()
 
+            # HEAD request
             if head_only:
+
                 try:
                     process.kill()
                 except Exception:
                     pass
 
                 try:
-                    process.wait(timeout=5)
+                    process.wait(
+                        timeout=5,
+                    )
                 except Exception:
                     pass
 
                 return
 
-            # اولین chunk
-            self.wfile.write(first_chunk)
+            # ───────────────────────────────────────────────────────
+            # SEND FIRST CHUNK
+            # ───────────────────────────────────────────────────────
+
+            self.wfile.write(
+                first_chunk
+            )
+
             self.wfile.flush()
 
-            total = len(first_chunk)
+            total = len(
+                first_chunk
+            )
 
-            # stream مستقیم
+            # ───────────────────────────────────────────────────────
+            # STREAM REST
+            # ───────────────────────────────────────────────────────
+
             while True:
 
-                chunk = process.stdout.read(
-                    64 * 1024
+                chunk = (
+                    process.stdout.read(
+                        64 * 1024
+                    )
                 )
 
                 if not chunk:
                     break
 
-                self.wfile.write(chunk)
+                self.wfile.write(
+                    chunk
+                )
+
                 self.wfile.flush()
 
                 total += len(chunk)
@@ -569,10 +770,16 @@ class MuxHandler(BaseHTTPRequestHandler):
             return_code = process.wait()
 
             print(
-                f"[MUX] Finished: "
-                f"{total} bytes, "
-                f"exit={return_code}"
+                "[MUX] Finished:",
+                total,
+                "bytes, exit=",
+                return_code,
+                flush=True,
             )
+
+        # ───────────────────────────────────────────────────────────
+        # CLIENT DISCONNECTED
+        # ───────────────────────────────────────────────────────────
 
         except (
             BrokenPipeError,
@@ -580,7 +787,8 @@ class MuxHandler(BaseHTTPRequestHandler):
         ):
 
             print(
-                "[MUX] Client disconnected"
+                "[MUX] Client disconnected",
+                flush=True,
             )
 
             try:
@@ -589,15 +797,22 @@ class MuxHandler(BaseHTTPRequestHandler):
                 pass
 
             try:
-                process.wait(timeout=5)
+                process.wait(
+                    timeout=5,
+                )
             except Exception:
                 pass
+
+        # ───────────────────────────────────────────────────────────
+        # OTHER ERROR
+        # ───────────────────────────────────────────────────────────
 
         except Exception as exc:
 
             print(
                 "[MUX] Stream error:",
                 repr(exc),
+                flush=True,
             )
 
             try:
@@ -606,14 +821,21 @@ class MuxHandler(BaseHTTPRequestHandler):
                 pass
 
             try:
-                process.wait(timeout=5)
+                process.wait(
+                    timeout=5,
+                )
             except Exception:
                 pass
 
 
+# ═══════════════════════════════════════════════════════════════════
+# MAIN
+# ═══════════════════════════════════════════════════════════════════
+
 def main():
 
     if not MUX_SECRET:
+
         raise RuntimeError(
             "MUX_SECRET environment variable is required"
         )
@@ -625,7 +847,8 @@ def main():
 
     print(
         f"[START] Listening on "
-        f"0.0.0.0:{PORT}"
+        f"0.0.0.0:{PORT}",
+        flush=True,
     )
 
     server.serve_forever()
