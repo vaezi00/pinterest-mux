@@ -4,6 +4,8 @@ import hmac
 import hashlib
 import subprocess
 import threading
+import json
+
 from urllib.parse import urlparse, parse_qs
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
@@ -21,23 +23,39 @@ ALLOWED_HOSTS = {
 MAX_TTL = 3600
 MAX_URL_LENGTH = 5000
 
+USER_AGENT = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+    "AppleWebKit/537.36 (KHTML, like Gecko) "
+    "Chrome/140.0.0.0 Safari/537.36"
+)
 
-def error_json(message):
-    body = (
-        '{"ok":false,"error":'
-        + json_escape(message)
-        + "}"
+
+def send_json(handler, status, data):
+    body = json.dumps(
+        data,
+        ensure_ascii=False,
+        separators=(",", ":"),
     ).encode("utf-8")
 
-    return body
+    handler.send_response(status)
+    handler.send_header(
+        "Content-Type",
+        "application/json; charset=utf-8",
+    )
+    handler.send_header(
+        "Content-Length",
+        str(len(body)),
+    )
+    handler.send_header(
+        "Cache-Control",
+        "no-store",
+    )
+    handler.end_headers()
+
+    handler.wfile.write(body)
 
 
-def json_escape(value: str) -> str:
-    import json
-    return json.dumps(str(value), ensure_ascii=False)
-
-
-def valid_cmfv_url(value: str) -> bool:
+def is_allowed_hls_url(value):
     if not value or len(value) > MAX_URL_LENGTH:
         return False
 
@@ -52,7 +70,7 @@ def valid_cmfv_url(value: str) -> bool:
 
         path = (u.path or "").lower()
 
-        if not path.endswith(".cmfv"):
+        if not path.endswith(".m3u8"):
             return False
 
         return True
@@ -61,8 +79,8 @@ def valid_cmfv_url(value: str) -> bool:
         return False
 
 
-def make_signature(video_url: str, audio_url: str, exp: int) -> str:
-    payload = f"{video_url}\n{audio_url}\n{exp}".encode("utf-8")
+def make_signature(source_url, exp):
+    payload = f"{source_url}\n{exp}".encode("utf-8")
 
     return hmac.new(
         MUX_SECRET.encode("utf-8"),
@@ -71,7 +89,7 @@ def make_signature(video_url: str, audio_url: str, exp: int) -> str:
     ).hexdigest()
 
 
-def verify_signature(video_url: str, audio_url: str, exp_text: str, sig: str) -> bool:
+def verify_signature(source_url, exp_text, sig):
     if not MUX_SECRET:
         return False
 
@@ -88,43 +106,32 @@ def verify_signature(video_url: str, audio_url: str, exp_text: str, sig: str) ->
     if exp > now + MAX_TTL:
         return False
 
-    expected = make_signature(video_url, audio_url, exp)
+    expected = make_signature(source_url, exp)
 
     return hmac.compare_digest(expected, sig)
 
 
-def send_json(handler, status: int, data: dict):
-    import json
-
-    body = json.dumps(
-        data,
-        ensure_ascii=False,
-        separators=(",", ":"),
-    ).encode("utf-8")
-
-    handler.send_response(status)
-    handler.send_header("Content-Type", "application/json; charset=utf-8")
-    handler.send_header("Content-Length", str(len(body)))
-    handler.send_header("Cache-Control", "no-store")
-    handler.end_headers()
-    handler.wfile.write(body)
-
-
 class MuxHandler(BaseHTTPRequestHandler):
 
-    server_version = "PinterestMux/1.0"
+    server_version = "PinterestMux/2.0"
 
     def log_message(self, fmt, *args):
-        print(f"[HTTP] {self.address_string()} - {fmt % args}")
+        print(
+            f"[HTTP] {self.address_string()} - {fmt % args}"
+        )
 
     def do_GET(self):
-        self.handle_request(send_body=True)
+        self.handle_request()
 
     def do_HEAD(self):
-        self.handle_request(send_body=False)
+        self.handle_request(head_only=True)
 
-    def handle_request(self, send_body: bool):
+    def handle_request(self, head_only=False):
         parsed = urlparse(self.path)
+
+        # ─────────────────────────────────────────────
+        # HEALTH
+        # ─────────────────────────────────────────────
 
         if parsed.path == "/health":
             send_json(
@@ -136,6 +143,10 @@ class MuxHandler(BaseHTTPRequestHandler):
                 },
             )
             return
+
+        # ─────────────────────────────────────────────
+        # MUX
+        # ─────────────────────────────────────────────
 
         if parsed.path != "/mux":
             send_json(
@@ -150,40 +161,28 @@ class MuxHandler(BaseHTTPRequestHandler):
 
         query = parse_qs(parsed.query)
 
-        video_url = query.get("video", [None])[0]
-        audio_url = query.get("audio", [None])[0]
+        source_url = query.get("source", [None])[0]
         exp = query.get("exp", [None])[0]
         sig = query.get("sig", [None])[0]
 
-        if not video_url or not audio_url:
+        if not source_url:
             send_json(
                 self,
                 400,
                 {
                     "ok": False,
-                    "error": "missing_video_or_audio",
+                    "error": "missing_source",
                 },
             )
             return
 
-        if not valid_cmfv_url(video_url):
+        if not is_allowed_hls_url(source_url):
             send_json(
                 self,
                 400,
                 {
                     "ok": False,
-                    "error": "invalid_video_url",
-                },
-            )
-            return
-
-        if not valid_cmfv_url(audio_url):
-            send_json(
-                self,
-                400,
-                {
-                    "ok": False,
-                    "error": "invalid_audio_url",
+                    "error": "invalid_hls_url",
                 },
             )
             return
@@ -199,7 +198,11 @@ class MuxHandler(BaseHTTPRequestHandler):
             )
             return
 
-        if not verify_signature(video_url, audio_url, exp, sig):
+        if not verify_signature(
+            source_url,
+            exp,
+            sig,
+        ):
             send_json(
                 self,
                 403,
@@ -211,50 +214,55 @@ class MuxHandler(BaseHTTPRequestHandler):
             return
 
         self.stream_mux(
-            video_url,
-            audio_url,
-            send_body=send_body,
+            source_url,
+            head_only=head_only,
         )
 
-    def stream_mux(self, video_url: str, audio_url: str, send_body: bool):
+    def stream_mux(self, source_url, head_only=False):
+
+        headers = (
+            f"User-Agent: {USER_AGENT}\r\n"
+            "Accept: */*\r\n"
+            "Referer: https://www.pinterest.com/\r\n"
+            "Origin: https://www.pinterest.com\r\n"
+        )
+
         cmd = [
             "ffmpeg",
 
             "-hide_banner",
             "-loglevel", "error",
 
-            # Remote HTTP inputs
+            # HTTP timeout
             "-rw_timeout", "30000000",
 
-            # Input 1 = video
-            "-i", video_url,
+            # HTTP headers for Pinterest
+            "-headers", headers,
 
-            # Input 2 = audio
-            "-i", audio_url,
+            # HLS master
+            "-i", source_url,
 
-            # Explicit mapping
+            # Explicit streams
             "-map", "0:v:0",
-            "-map", "1:a:0",
+            "-map", "0:a:0",
 
             # NO re-encoding
             "-c:v", "copy",
             "-c:a", "copy",
 
-            # Needed for fragmented MP4 over HTTP pipe
+            # Fragmented MP4 for HTTP streaming
             "-movflags",
             "+frag_keyframe+empty_moov+default_base_moof",
 
-            # Stop when the shortest input ends
             "-shortest",
 
-            # Output directly to stdout
+            # stdout
             "-f", "mp4",
             "pipe:1",
         ]
 
         print("[MUX] Starting FFmpeg")
-        print("[MUX] video:", video_url)
-        print("[MUX] audio:", audio_url)
+        print("[MUX] Source:", source_url)
 
         try:
             process = subprocess.Popen(
@@ -264,21 +272,22 @@ class MuxHandler(BaseHTTPRequestHandler):
                 bufsize=0,
             )
         except Exception as exc:
-            print("[MUX] Failed to start FFmpeg:", repr(exc))
+            print(
+                "[MUX] FFmpeg start failed:",
+                repr(exc),
+            )
 
-            if not self.wfile.closed:
-                send_json(
-                    self,
-                    500,
-                    {
-                        "ok": False,
-                        "error": "ffmpeg_start_failed",
-                    },
-                )
+            send_json(
+                self,
+                500,
+                {
+                    "ok": False,
+                    "error": "ffmpeg_start_failed",
+                },
+            )
             return
 
-        # Drain stderr in a separate thread so FFmpeg cannot block
-        # because its stderr pipe becomes full.
+        # stderr را جداگانه بخوان
         def drain_stderr():
             try:
                 while True:
@@ -298,75 +307,89 @@ class MuxHandler(BaseHTTPRequestHandler):
             except Exception:
                 pass
 
-        stderr_thread = threading.Thread(
+        threading.Thread(
             target=drain_stderr,
             daemon=True,
-        )
-        stderr_thread.start()
+        ).start()
 
         try:
-            # Read only a small first chunk.
-            # We never buffer the whole output.
-            first_chunk = process.stdout.read(64 * 1024)
+
+            # اولین chunk
+            first_chunk = process.stdout.read(
+                64 * 1024
+            )
 
             if not first_chunk:
-                return_code = process.poll()
 
-                if return_code is None:
-                    return_code = process.wait(timeout=10)
+                return_code = process.wait(
+                    timeout=20
+                )
 
                 print(
-                    "[MUX] FFmpeg produced no output, exit:",
+                    "[MUX] No output. FFmpeg exit:",
                     return_code,
                 )
 
-                if not self.wfile.closed:
-                    send_json(
-                        self,
-                        502,
-                        {
-                            "ok": False,
-                            "error": "ffmpeg_no_output",
-                            "exit_code": return_code,
-                        },
-                    )
+                send_json(
+                    self,
+                    502,
+                    {
+                        "ok": False,
+                        "error": "ffmpeg_no_output",
+                        "exit_code": return_code,
+                    },
+                )
+
                 return
 
-            # We deliberately do NOT send Content-Length.
-            # Output size is unknown and is streamed progressively.
+            # HEAD فقط برای تست
             self.send_response(200)
+
             self.send_header(
                 "Content-Type",
                 "video/mp4",
             )
+
             self.send_header(
                 "Cache-Control",
                 "no-store",
             )
+
             self.send_header(
                 "Content-Disposition",
-                'inline; filename="video.mp4"',
+                'inline; filename="pinterest.mp4"',
             )
-            self.send_header(
-                "Accept-Ranges",
-                "none",
-            )
+
+            # حجم نهایی از قبل معلوم نیست
+            # بنابراین Content-Length نمی‌فرستیم.
+
             self.end_headers()
 
-            if not send_body:
-                process.kill()
-                process.wait()
+            if head_only:
+                try:
+                    process.kill()
+                except Exception:
+                    pass
+
+                try:
+                    process.wait(timeout=5)
+                except Exception:
+                    pass
+
                 return
 
-            # Send first chunk.
+            # اولین chunk
             self.wfile.write(first_chunk)
             self.wfile.flush()
 
             total = len(first_chunk)
 
-            # Then continuously pipe FFmpeg stdout -> HTTP response.
+            # stream مستقیم
             while True:
-                chunk = process.stdout.read(64 * 1024)
+
+                chunk = process.stdout.read(
+                    64 * 1024
+                )
 
                 if not chunk:
                     break
@@ -379,11 +402,19 @@ class MuxHandler(BaseHTTPRequestHandler):
             return_code = process.wait()
 
             print(
-                f"[MUX] Finished: {total} bytes, exit={return_code}"
+                f"[MUX] Finished: "
+                f"{total} bytes, "
+                f"exit={return_code}"
             )
 
-        except (BrokenPipeError, ConnectionResetError):
-            print("[MUX] Client disconnected")
+        except (
+            BrokenPipeError,
+            ConnectionResetError,
+        ):
+
+            print(
+                "[MUX] Client disconnected"
+            )
 
             try:
                 process.kill()
@@ -396,7 +427,11 @@ class MuxHandler(BaseHTTPRequestHandler):
                 pass
 
         except Exception as exc:
-            print("[MUX] Streaming error:", repr(exc))
+
+            print(
+                "[MUX] Stream error:",
+                repr(exc),
+            )
 
             try:
                 process.kill()
@@ -410,6 +445,7 @@ class MuxHandler(BaseHTTPRequestHandler):
 
 
 def main():
+
     if not MUX_SECRET:
         raise RuntimeError(
             "MUX_SECRET environment variable is required"
@@ -420,14 +456,12 @@ def main():
         MuxHandler,
     )
 
-    print(f"[START] Pinterest mux listening on 0.0.0.0:{PORT}")
+    print(
+        f"[START] Listening on "
+        f"0.0.0.0:{PORT}"
+    )
 
-    try:
-        server.serve_forever()
-    except KeyboardInterrupt:
-        pass
-    finally:
-        server.server_close()
+    server.serve_forever()
 
 
 if __name__ == "__main__":
