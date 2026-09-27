@@ -7,6 +7,7 @@ import threading
 import json
 import urllib.request
 import urllib.error
+import tempfile
 
 from urllib.parse import urlparse, parse_qs
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -527,97 +528,257 @@ class MuxHandler(BaseHTTPRequestHandler):
     # FFMPEG
     # ═══════════════════════════════════════════════════════════════
 
-    def stream_mux(
-        self,
-        source_url,
-        head_only=False,
-    ):
-
-        headers = (
-            f"User-Agent: {USER_AGENT}\r\n"
-            "Accept: */*\r\n"
-            "Referer: https://www.pinterest.com/\r\n"
-            "Origin: https://www.pinterest.com\r\n"
-        )
-
-        cmd = [
-            "ffmpeg",
-
-            "-hide_banner",
-            "-loglevel",
-            "error",
-
-            "-rw_timeout",
-            "30000000",
-
-            "-headers",
-            headers,
-
-            "-i",
-            source_url,
-
-            "-map",
-            "0:v:0",
-
-            "-map",
-            "0:a:0",
-
-            "-c:v",
-            "copy",
-
-            "-c:a",
-            "copy",
-
-            "-movflags",
-            "+frag_keyframe+empty_moov+default_base_moof",
-
-            "-shortest",
-
-            "-f",
-            "mp4",
-
-            "pipe:1",
-        ]
-
-        print(
-            "[MUX] Starting FFmpeg",
-            flush=True,
-        )
-
-        print(
-            "[MUX] Source:",
-            source_url,
-            flush=True,
-        )
-
+    def stream_mux(handler, source_hls):
+        temp_path = None
+    
         try:
-
-            process = subprocess.Popen(
+            # ─────────────────────────────────────────────────────────
+            # فایل موقت روی خود Render
+            #
+            # فایل روی PC یا Cloudflare ذخیره نمی‌شود.
+            # ─────────────────────────────────────────────────────────
+            tmp = tempfile.NamedTemporaryFile(
+                prefix="mux_",
+                suffix=".mp4",
+                dir="/tmp",
+                delete=False,
+            )
+    
+            temp_path = tmp.name
+            tmp.close()
+    
+            log(
+                "FFmpeg output file:",
+                temp_path,
+            )
+    
+            # ─────────────────────────────────────────────────────────
+            # FFmpeg
+            #
+            # تفاوت مهم با نسخه قبلی:
+            #
+            # قبلاً:
+            #     -movflags +frag_keyframe+empty_moov+default_base_moof
+            #     -f mp4 pipe:1
+            #
+            # الان:
+            #     فایل MP4 کامل روی دیسک ساخته می‌شود.
+            #     moov نهایی می‌شود.
+            #     faststart آن را ابتدای فایل می‌آورد.
+            #
+            # نتیجه:
+            #     duration درست
+            #     seek درست‌تر
+            #     MP4 استاندارد
+            # ─────────────────────────────────────────────────────────
+            cmd = [
+                "ffmpeg",
+                "-hide_banner",
+                "-loglevel",
+                "error",
+    
+                "-rw_timeout",
+                "30000000",
+    
+                "-headers",
+                (
+                    "User-Agent: Mozilla/5.0\r\n"
+                    "Referer: https://www.pinterest.com/\r\n"
+                    "Origin: https://www.pinterest.com\r\n"
+                ),
+    
+                "-i",
+                source_hls,
+    
+                "-map",
+                "0:v:0",
+    
+                "-map",
+                "0:a:0?",
+    
+                "-c:v",
+                "copy",
+    
+                "-c:a",
+                "copy",
+    
+                "-movflags",
+                "+faststart",
+    
+                "-shortest",
+    
+                "-f",
+                "mp4",
+    
+                temp_path,
+            ]
+    
+            log(
+                "Starting FFmpeg..."
+            )
+    
+            result = subprocess.run(
                 cmd,
-                stdout=subprocess.PIPE,
+                stdout=subprocess.DEVNULL,
                 stderr=subprocess.PIPE,
-                bufsize=0,
+                text=True,
             )
-
-        except Exception as exc:
-
-            print(
-                "[MUX] FFmpeg start failed:",
-                repr(exc),
-                flush=True,
-            )
-
-            send_json(
-                self,
-                500,
-                {
+    
+            if result.returncode != 0:
+                error_text = (
+                    result.stderr.strip()
+                    if result.stderr
+                    else "ffmpeg_failed"
+                )
+    
+                log(
+                    "FFmpeg failed:",
+                    error_text[:2000],
+                )
+    
+                handler.send_response(502)
+                handler.send_header(
+                    "Content-Type",
+                    "application/json; charset=utf-8",
+                )
+                handler.end_headers()
+    
+                body = json.dumps({
                     "ok": False,
-                    "error": "ffmpeg_start_failed",
-                },
+                    "error": "ffmpeg_failed",
+                    "details": error_text[:1000],
+                }).encode("utf-8")
+    
+                handler.wfile.write(body)
+                return
+    
+            # ─────────────────────────────────────────────────────────
+            # حجم فایل نهایی
+            # ─────────────────────────────────────────────────────────
+            try:
+                file_size = os.path.getsize(
+                    temp_path
+                )
+            except Exception:
+                file_size = 0
+    
+            if file_size <= 0:
+                raise RuntimeError(
+                    "mux_output_empty"
+                )
+    
+            log(
+                "FFmpeg completed:",
+                file_size,
+                "bytes",
             )
-
-            return
-
+    
+            # ─────────────────────────────────────────────────────────
+            # پاسخ HTTP
+            #
+            # حالا فایل کامل است و Content-Length واقعی داریم.
+            # ─────────────────────────────────────────────────────────
+            handler.send_response(200)
+    
+            handler.send_header(
+                "Content-Type",
+                "video/mp4",
+            )
+    
+            handler.send_header(
+                "Content-Length",
+                str(file_size),
+            )
+    
+            handler.send_header(
+                "Content-Disposition",
+                'inline; filename="video.mp4"',
+            )
+    
+            handler.send_header(
+                "Accept-Ranges",
+                "bytes",
+            )
+    
+            handler.send_header(
+                "Cache-Control",
+                "no-store",
+            )
+    
+            handler.end_headers()
+    
+            # ─────────────────────────────────────────────────────────
+            # فایل کامل → HTTP stream
+            # ─────────────────────────────────────────────────────────
+            with open(
+                temp_path,
+                "rb",
+            ) as f:
+                while True:
+                    chunk = f.read(
+                        1024 * 1024
+                    )
+    
+                    if not chunk:
+                        break
+    
+                    try:
+                        handler.wfile.write(
+                            chunk
+                        )
+                        handler.wfile.flush()
+    
+                    except (BrokenPipeError, ConnectionResetError):
+                        log(
+                            "Client disconnected during mux download"
+                        )
+                        break
+    
+        except Exception as e:
+            log(
+                "stream_mux failed:",
+                e,
+            )
+    
+            try:
+                handler.send_response(500)
+                handler.send_header(
+                    "Content-Type",
+                    "application/json; charset=utf-8",
+                )
+                handler.end_headers()
+    
+                body = json.dumps({
+                    "ok": False,
+                    "error": str(e),
+                }).encode("utf-8")
+    
+                handler.wfile.write(body)
+    
+            except Exception:
+                pass
+    
+        finally:
+            # ─────────────────────────────────────────────────────────
+            # پاک کردن فایل موقت
+            # ─────────────────────────────────────────────────────────
+            if temp_path:
+                try:
+                    os.remove(temp_path)
+    
+                    log(
+                        "Temp mux file removed:",
+                        temp_path,
+                    )
+    
+                except FileNotFoundError:
+                    pass
+    
+                except Exception as e:
+                    log(
+                        "Temp file cleanup failed:",
+                        e,
+                    )
         # ───────────────────────────────────────────────────────────
         # FFmpeg STDERR
         # ───────────────────────────────────────────────────────────
