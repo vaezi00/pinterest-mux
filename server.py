@@ -1,4 +1,3 @@
-```python
 import os
 import time
 import hmac
@@ -966,4 +965,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-```
