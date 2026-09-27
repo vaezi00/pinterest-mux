@@ -402,9 +402,23 @@ class MuxHandler(BaseHTTPRequestHandler):
         self.handle_request()
 
     def do_HEAD(self):
-        self.handle_request(
-            head_only=True,
-        )
+        parsed = urlparse(self.path)
+
+        if parsed.path == "/health":
+            send_json(
+                self,
+                200,
+                {
+                    "ok": True,
+                    "service": "pinterest-mux",
+                },
+            )
+            return
+
+        self.send_response(405)
+        self.send_header("Allow", "GET")
+        self.send_header("Content-Length", "0")
+        self.end_headers()
 
     # ═══════════════════════════════════════════════════════════════
     # ROUTER
@@ -422,8 +436,6 @@ class MuxHandler(BaseHTTPRequestHandler):
         # تایمر Suspend را لغو می‌کند.
         #
         # Health check نباید سرویس را بیدار/فعال نگه دارد.
-        if parsed.path == "/mux":
-            cancel_pending_suspend()
 
         # ───────────────────────────────────────────────────────────
         # HEALTH
