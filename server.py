@@ -1,3 +1,4 @@
+```python
 import os
 import time
 import hmac
@@ -12,15 +13,30 @@ import tempfile
 from urllib.parse import urlparse, parse_qs
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
+
+# ═══════════════════════════════════════════════════════════════════
+# LOG
+# ═══════════════════════════════════════════════════════════════════
+
 def log(*args):
     print("[MUX]", *args, flush=True)
+
+
 # ═══════════════════════════════════════════════════════════════════
 # CONFIG
 # ═══════════════════════════════════════════════════════════════════
 
-PORT = int(os.environ.get("PORT", "10000"))
+PORT = int(
+    os.environ.get(
+        "PORT",
+        "10000",
+    )
+)
 
-MUX_SECRET = os.environ.get("MUX_SECRET", "").strip()
+MUX_SECRET = os.environ.get(
+    "MUX_SECRET",
+    "",
+).strip()
 
 RENDER_API_KEY = os.environ.get(
     "RENDER_API_KEY",
@@ -32,7 +48,9 @@ RENDER_SERVICE_ID = os.environ.get(
     "",
 ).strip()
 
+# چند ثانیه بعد از پایان آخرین MUX، سرویس Suspend شود
 SUSPEND_DELAY_SECONDS = 10
+
 
 ALLOWED_HOSTS = {
     "i.pinimg.com",
@@ -43,6 +61,7 @@ ALLOWED_HOSTS = {
 
 MAX_TTL = 3600
 MAX_URL_LENGTH = 5000
+
 
 USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -56,7 +75,6 @@ USER_AGENT = (
 # ═══════════════════════════════════════════════════════════════════
 
 _active_mux_requests = 0
-
 _active_mux_lock = threading.Lock()
 
 _suspend_timer = None
@@ -129,7 +147,10 @@ def is_allowed_hls_url(value):
 # ═══════════════════════════════════════════════════════════════════
 
 def make_signature(source_url, exp):
-    payload = f"{source_url}\n{exp}".encode("utf-8")
+    payload = (
+        f"{source_url}\n"
+        f"{exp}"
+    ).encode("utf-8")
 
     return hmac.new(
         MUX_SECRET.encode("utf-8"),
@@ -138,13 +159,21 @@ def make_signature(source_url, exp):
     ).hexdigest()
 
 
-def verify_signature(source_url, exp_text, sig):
+def verify_signature(
+    source_url,
+    exp_text,
+    sig,
+):
     if not MUX_SECRET:
         return False
 
     try:
         exp = int(exp_text)
-    except (TypeError, ValueError):
+
+    except (
+        TypeError,
+        ValueError,
+    ):
         return False
 
     now = int(time.time())
@@ -179,6 +208,7 @@ def cancel_pending_suspend():
 
             try:
                 _suspend_timer.cancel()
+
             except Exception:
                 pass
 
@@ -197,6 +227,7 @@ def schedule_suspend():
 
             try:
                 _suspend_timer.cancel()
+
             except Exception:
                 pass
 
@@ -206,11 +237,10 @@ def schedule_suspend():
         )
 
         _suspend_timer.daemon = True
-
         _suspend_timer.start()
 
         print(
-            f"[SUSPEND] Scheduled in "
+            "[SUSPEND] Scheduled in "
             f"{SUSPEND_DELAY_SECONDS}s",
             flush=True,
         )
@@ -268,7 +298,6 @@ def suspend_render_service():
             )
 
             _suspend_timer = None
-
             return
 
         _suspend_timer = None
@@ -334,6 +363,7 @@ def suspend_render_service():
                 "utf-8",
                 errors="replace",
             )
+
         except Exception:
             pass
 
@@ -363,7 +393,7 @@ class MuxHandler(BaseHTTPRequestHandler):
 
     def log_message(self, fmt, *args):
         print(
-            f"[HTTP] "
+            "[HTTP] "
             f"{self.address_string()} - "
             f"{fmt % args}",
             flush=True,
@@ -380,11 +410,19 @@ class MuxHandler(BaseHTTPRequestHandler):
     # ═══════════════════════════════════════════════════════════════
     # ROUTER
     # ═══════════════════════════════════════════════════════════════
-    def handle_request(self, head_only=False):
 
-        parsed = urlparse(self.path)
+    def handle_request(
+        self,
+        head_only=False,
+    ):
+        parsed = urlparse(
+            self.path
+        )
 
-        # فقط درخواست واقعی mux تایمر suspend را لغو می‌کند.
+        # فقط درخواست واقعی /mux
+        # تایمر Suspend را لغو می‌کند.
+        #
+        # Health check نباید سرویس را بیدار/فعال نگه دارد.
         if parsed.path == "/mux":
             cancel_pending_suspend()
 
@@ -421,7 +459,6 @@ class MuxHandler(BaseHTTPRequestHandler):
             )
 
             return
-
 
         query = parse_qs(
             parsed.query,
@@ -526,353 +563,122 @@ class MuxHandler(BaseHTTPRequestHandler):
             mux_request_finished()
 
     # ═══════════════════════════════════════════════════════════════
-    # FFMPEG
+    # FFMPEG + COMPLETE MP4
     # ═══════════════════════════════════════════════════════════════
 
-    def stream_mux(self, source_hls, head_only=False):
+    def stream_mux(
+        self,
+        source_hls,
+        head_only=False,
+    ):
         temp_path = None
-    
+        response_started = False
+
         try:
-            # ─────────────────────────────────────────────────────────
+
+            # ───────────────────────────────────────────────────────
             # فایل موقت روی خود Render
             #
-            # فایل روی PC یا Cloudflare ذخیره نمی‌شود.
-            # ─────────────────────────────────────────────────────────
+            # روی PC یا Cloudflare ذخیره نمی‌شود.
+            # ───────────────────────────────────────────────────────
+
             tmp = tempfile.NamedTemporaryFile(
                 prefix="mux_",
                 suffix=".mp4",
                 dir="/tmp",
                 delete=False,
             )
-    
+
             temp_path = tmp.name
+
             tmp.close()
-    
+
             log(
                 "FFmpeg output file:",
                 temp_path,
             )
-    
-            # ─────────────────────────────────────────────────────────
-            # FFmpeg
+
+            # ───────────────────────────────────────────────────────
+            # FFMPEG
             #
-            # تفاوت مهم با نسخه قبلی:
+            # خروجی کامل MP4 روی فایل ساخته می‌شود.
             #
-            # قبلاً:
-            #     -movflags +frag_keyframe+empty_moov+default_base_moof
-            #     -f mp4 pipe:1
-            #
-            # الان:
-            #     فایل MP4 کامل روی دیسک ساخته می‌شود.
-            #     moov نهایی می‌شود.
-            #     faststart آن را ابتدای فایل می‌آورد.
-            #
-            # نتیجه:
-            #     duration درست
-            #     seek درست‌تر
-            #     MP4 استاندارد
-            # ─────────────────────────────────────────────────────────
+            # +faststart باعث می‌شود moov در ابتدای فایل قرار گیرد.
+            # ───────────────────────────────────────────────────────
+
             cmd = [
                 "ffmpeg",
+
                 "-hide_banner",
+
                 "-loglevel",
                 "error",
-    
+
                 "-rw_timeout",
                 "30000000",
-    
+
                 "-headers",
                 (
-                    "User-Agent: Mozilla/5.0\r\n"
-                    "Referer: https://www.pinterest.com/\r\n"
-                    "Origin: https://www.pinterest.com\r\n"
+                    "User-Agent: "
+                    f"{USER_AGENT}\r\n"
+                    "Referer: "
+                    "https://www.pinterest.com/\r\n"
+                    "Origin: "
+                    "https://www.pinterest.com\r\n"
                 ),
-    
+
                 "-i",
                 source_hls,
-    
+
                 "-map",
                 "0:v:0",
-    
+
                 "-map",
                 "0:a:0?",
-    
+
                 "-c:v",
                 "copy",
-    
+
                 "-c:a",
                 "copy",
-    
+
                 "-movflags",
                 "+faststart",
-    
+
                 "-shortest",
-    
+
                 "-f",
                 "mp4",
-    
+
                 temp_path,
             ]
-    
+
             log(
                 "Starting FFmpeg..."
             )
-    
+
             result = subprocess.run(
                 cmd,
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.PIPE,
                 text=True,
             )
-            
-            # ─────────────────────────────────────────────────────────
-            # تشخیص duration واقعی فایل تولیدشده
-            # ─────────────────────────────────────────────────────────
-            if result.returncode == 0:
-                probe = subprocess.run(
-                    [
-                        "ffprobe",
-                        "-v",
-                        "error",
-                        "-show_entries",
-                        "format=duration,size",
-                        "-show_entries",
-                        "stream=index,codec_type,duration,time_base,start_time",
-                        "-of",
-                        "json",
-                        temp_path,
-                    ],
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.PIPE,
-                    text=True,
-                )
-            
-                log(
-                    "FFPROBE:",
-                    probe.stdout[:5000],
-                )
-            
-                if probe.returncode != 0:
-                    log(
-                        "FFPROBE ERROR:",
-                        probe.stderr[:2000],
-                    )
+
+            # ───────────────────────────────────────────────────────
+            # FFMPEG ERROR
+            # ───────────────────────────────────────────────────────
 
             if result.returncode != 0:
+
                 error_text = (
                     result.stderr.strip()
                     if result.stderr
                     else "ffmpeg_failed"
                 )
-    
+
                 log(
                     "FFmpeg failed:",
                     error_text[:2000],
-                )
-    
-                handler.send_response(502)
-                handler.send_header(
-                    "Content-Type",
-                    "application/json; charset=utf-8",
-                )
-                handler.end_headers()
-    
-                body = json.dumps({
-                    "ok": False,
-                    "error": "ffmpeg_failed",
-                    "details": error_text[:1000],
-                }).encode("utf-8")
-    
-                handler.wfile.write(body)
-                return
-    
-            # ─────────────────────────────────────────────────────────
-            # حجم فایل نهایی
-            # ─────────────────────────────────────────────────────────
-            try:
-                file_size = os.path.getsize(
-                    temp_path
-                )
-            except Exception:
-                file_size = 0
-    
-            if file_size <= 0:
-                raise RuntimeError(
-                    "mux_output_empty"
-                )
-    
-            log(
-                "FFmpeg completed:",
-                file_size,
-                "bytes",
-            )
-    
-            # ─────────────────────────────────────────────────────────
-            # پاسخ HTTP
-            #
-            # حالا فایل کامل است و Content-Length واقعی داریم.
-            # ─────────────────────────────────────────────────────────
-            handler.send_response(200)
-    
-            handler.send_header(
-                "Content-Type",
-                "video/mp4",
-            )
-    
-            handler.send_header(
-                "Content-Length",
-                str(file_size),
-            )
-    
-            handler.send_header(
-                "Content-Disposition",
-                'inline; filename="video.mp4"',
-            )
-    
-            handler.send_header(
-                "Accept-Ranges",
-                "bytes",
-            )
-    
-            handler.send_header(
-                "Cache-Control",
-                "no-store",
-            )
-    
-            handler.end_headers()
-    
-            # ─────────────────────────────────────────────────────────
-            # فایل کامل → HTTP stream
-            # ─────────────────────────────────────────────────────────
-            with open(
-                temp_path,
-                "rb",
-            ) as f:
-                while True:
-                    chunk = f.read(
-                        1024 * 1024
-                    )
-    
-                    if not chunk:
-                        break
-    
-                    try:
-                        handler.wfile.write(
-                            chunk
-                        )
-                        handler.wfile.flush()
-    
-                    except (BrokenPipeError, ConnectionResetError):
-                        log(
-                            "Client disconnected during mux download"
-                        )
-                        break
-    
-        except Exception as e:
-            log(
-                "stream_mux failed:",
-                e,
-            )
-    
-            try:
-                handler.send_response(500)
-                handler.send_header(
-                    "Content-Type",
-                    "application/json; charset=utf-8",
-                )
-                handler.end_headers()
-    
-                body = json.dumps({
-                    "ok": False,
-                    "error": str(e),
-                }).encode("utf-8")
-    
-                handler.wfile.write(body)
-    
-            except Exception:
-                pass
-    
-        finally:
-            # ─────────────────────────────────────────────────────────
-            # پاک کردن فایل موقت
-            # ─────────────────────────────────────────────────────────
-            if temp_path:
-                try:
-                    os.remove(temp_path)
-    
-                    log(
-                        "Temp mux file removed:",
-                        temp_path,
-                    )
-    
-                except FileNotFoundError:
-                    pass
-    
-                except Exception as e:
-                    log(
-                        "Temp file cleanup failed:",
-                        e,
-                    )
-        # ───────────────────────────────────────────────────────────
-        # FFmpeg STDERR
-        # ───────────────────────────────────────────────────────────
-
-        def drain_stderr():
-
-            try:
-
-                while True:
-
-                    line = (
-                        process.stderr.readline()
-                    )
-
-                    if not line:
-                        break
-
-                    text = line.decode(
-                        "utf-8",
-                        errors="replace",
-                    ).strip()
-
-                    if text:
-
-                        print(
-                            "[FFmpeg]",
-                            text,
-                            flush=True,
-                        )
-
-            except Exception:
-                pass
-
-        threading.Thread(
-            target=drain_stderr,
-            daemon=True,
-        ).start()
-
-        # ───────────────────────────────────────────────────────────
-        # READ / STREAM
-        # ───────────────────────────────────────────────────────────
-
-        try:
-
-            first_chunk = (
-                process.stdout.read(
-                    64 * 1024
-                )
-            )
-
-            if not first_chunk:
-
-                return_code = process.wait(
-                    timeout=20,
-                )
-
-                print(
-                    "[MUX] No output. "
-                    f"FFmpeg exit: {return_code}",
-                    flush=True,
                 )
 
                 send_json(
@@ -880,15 +686,93 @@ class MuxHandler(BaseHTTPRequestHandler):
                     502,
                     {
                         "ok": False,
-                        "error": "ffmpeg_no_output",
-                        "exit_code": return_code,
+                        "error": "ffmpeg_failed",
+                        "details": error_text[:1000],
                     },
                 )
+
+                response_started = True
 
                 return
 
             # ───────────────────────────────────────────────────────
-            # HTTP HEADERS
+            # FFPROBE
+            #
+            # برای فهمیدن duration واقعی فایل.
+            # ───────────────────────────────────────────────────────
+
+            probe = subprocess.run(
+                [
+                    "ffprobe",
+
+                    "-v",
+                    "error",
+
+                    "-show_entries",
+                    "format=duration,size",
+
+                    "-show_entries",
+                    (
+                        "stream="
+                        "index,"
+                        "codec_type,"
+                        "duration,"
+                        "time_base,"
+                        "start_time"
+                    ),
+
+                    "-of",
+                    "json",
+
+                    temp_path,
+                ],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+            )
+
+            log(
+                "FFPROBE:",
+                probe.stdout[:5000],
+            )
+
+            if probe.returncode != 0:
+
+                log(
+                    "FFPROBE ERROR:",
+                    probe.stderr[:2000],
+                )
+
+            # ───────────────────────────────────────────────────────
+            # FINAL FILE SIZE
+            # ───────────────────────────────────────────────────────
+
+            try:
+
+                file_size = os.path.getsize(
+                    temp_path
+                )
+
+            except Exception:
+
+                file_size = 0
+
+            if file_size <= 0:
+
+                raise RuntimeError(
+                    "mux_output_empty"
+                )
+
+            log(
+                "FFmpeg completed:",
+                file_size,
+                "bytes",
+            )
+
+            # ───────────────────────────────────────────────────────
+            # HTTP RESPONSE
+            #
+            # فایل کامل است و Content-Length واقعی دارد.
             # ───────────────────────────────────────────────────────
 
             self.send_response(200)
@@ -899,79 +783,86 @@ class MuxHandler(BaseHTTPRequestHandler):
             )
 
             self.send_header(
-                "Cache-Control",
-                "no-store",
+                "Content-Length",
+                str(file_size),
             )
 
             self.send_header(
                 "Content-Disposition",
-                'inline; filename="pinterest.mp4"',
+                'inline; filename="video.mp4"',
+            )
+
+            self.send_header(
+                "Cache-Control",
+                "no-store",
             )
 
             self.end_headers()
 
-            # HEAD request
+            response_started = True
+
+            # ───────────────────────────────────────────────────────
+            # HEAD
+            # ───────────────────────────────────────────────────────
+
             if head_only:
 
-                try:
-                    process.kill()
-                except Exception:
-                    pass
-
-                try:
-                    process.wait(
-                        timeout=5,
-                    )
-                except Exception:
-                    pass
+                log(
+                    "HEAD request completed:",
+                    file_size,
+                    "bytes",
+                )
 
                 return
 
             # ───────────────────────────────────────────────────────
-            # SEND FIRST CHUNK
+            # STREAM COMPLETE FILE
             # ───────────────────────────────────────────────────────
 
-            self.wfile.write(
-                first_chunk
-            )
+            total_sent = 0
 
-            self.wfile.flush()
+            with open(
+                temp_path,
+                "rb",
+            ) as f:
 
-            total = len(
-                first_chunk
-            )
+                while True:
 
-            # ───────────────────────────────────────────────────────
-            # STREAM REST
-            # ───────────────────────────────────────────────────────
-
-            while True:
-
-                chunk = (
-                    process.stdout.read(
-                        64 * 1024
+                    chunk = f.read(
+                        1024 * 1024
                     )
-                )
 
-                if not chunk:
-                    break
+                    if not chunk:
+                        break
 
-                self.wfile.write(
-                    chunk
-                )
+                    try:
 
-                self.wfile.flush()
+                        self.wfile.write(
+                            chunk
+                        )
 
-                total += len(chunk)
+                        self.wfile.flush()
 
-            return_code = process.wait()
+                        total_sent += len(
+                            chunk
+                        )
 
-            print(
-                "[MUX] Finished:",
-                total,
-                "bytes, exit=",
-                return_code,
-                flush=True,
+                    except (
+                        BrokenPipeError,
+                        ConnectionResetError,
+                    ):
+
+                        log(
+                            "Client disconnected "
+                            "during mux download"
+                        )
+
+                        break
+
+            log(
+                "HTTP stream completed:",
+                total_sent,
+                "bytes",
             )
 
         # ───────────────────────────────────────────────────────────
@@ -983,46 +874,65 @@ class MuxHandler(BaseHTTPRequestHandler):
             ConnectionResetError,
         ):
 
-            print(
-                "[MUX] Client disconnected",
-                flush=True,
+            log(
+                "Client disconnected"
             )
-
-            try:
-                process.kill()
-            except Exception:
-                pass
-
-            try:
-                process.wait(
-                    timeout=5,
-                )
-            except Exception:
-                pass
 
         # ───────────────────────────────────────────────────────────
         # OTHER ERROR
         # ───────────────────────────────────────────────────────────
 
-        except Exception as exc:
+        except Exception as e:
 
-            print(
-                "[MUX] Stream error:",
-                repr(exc),
-                flush=True,
+            log(
+                "stream_mux failed:",
+                repr(e),
             )
 
-            try:
-                process.kill()
-            except Exception:
-                pass
+            if not response_started:
 
-            try:
-                process.wait(
-                    timeout=5,
-                )
-            except Exception:
-                pass
+                try:
+
+                    send_json(
+                        self,
+                        500,
+                        {
+                            "ok": False,
+                            "error": str(e),
+                        },
+                    )
+
+                except Exception:
+                    pass
+
+        finally:
+
+            # ───────────────────────────────────────────────────────
+            # حذف فایل موقت
+            # ───────────────────────────────────────────────────────
+
+            if temp_path:
+
+                try:
+
+                    os.remove(
+                        temp_path
+                    )
+
+                    log(
+                        "Temp mux file removed:",
+                        temp_path,
+                    )
+
+                except FileNotFoundError:
+                    pass
+
+                except Exception as e:
+
+                    log(
+                        "Temp file cleanup failed:",
+                        repr(e),
+                    )
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -1038,12 +948,15 @@ def main():
         )
 
     server = ThreadingHTTPServer(
-        ("0.0.0.0", PORT),
+        (
+            "0.0.0.0",
+            PORT,
+        ),
         MuxHandler,
     )
 
     print(
-        f"[START] Listening on "
+        "[START] Listening on "
         f"0.0.0.0:{PORT}",
         flush=True,
     )
@@ -1053,3 +966,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+```
