@@ -378,12 +378,13 @@ class MuxHandler(BaseHTTPRequestHandler):
     # ═══════════════════════════════════════════════════════════════
     # ROUTER
     # ═══════════════════════════════════════════════════════════════
-
     def handle_request(self, head_only=False):
 
-        cancel_pending_suspend()
-
         parsed = urlparse(self.path)
+
+        # فقط درخواست واقعی mux تایمر suspend را لغو می‌کند.
+        if parsed.path == "/mux":
+            cancel_pending_suspend()
 
         # ───────────────────────────────────────────────────────────
         # HEALTH
@@ -418,6 +419,7 @@ class MuxHandler(BaseHTTPRequestHandler):
             )
 
             return
+
 
         query = parse_qs(
             parsed.query,
