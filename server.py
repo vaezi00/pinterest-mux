@@ -5,13 +5,20 @@ import hashlib
 import subprocess
 import threading
 import json
-
+import urllib.request
+import urllib.error
 from urllib.parse import urlparse, parse_qs
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 
-PORT = int(os.environ.get("PORT", "10000"))
-MUX_SECRET = os.environ.get("MUX_SECRET", "").strip()
+RENDER_API_KEY = os.environ.get("RENDER_API_KEY", "").strip()
+RENDER_SERVICE_ID = os.environ.get("RENDER_SERVICE_ID", "").strip()
+
+SUSPEND_DELAY_SECONDS = 10
+
+_active_mux_requests = 0
+_active_mux_lock = threading.Lock()
+_suspend_timer = None
 
 ALLOWED_HOSTS = {
     "i.pinimg.com",
@@ -110,7 +117,159 @@ def verify_signature(source_url, exp_text, sig):
 
     return hmac.compare_digest(expected, sig)
 
+def cancel_pending_suspend():
+    global _suspend_timer
 
+    with _active_mux_lock:
+        if _suspend_timer is not None:
+            try:
+                _suspend_timer.cancel()
+            except Exception:
+                pass
+
+            _suspend_timer = None
+
+
+def schedule_suspend():
+    global _suspend_timer
+
+    with _active_mux_lock:
+        if _active_mux_requests != 0:
+            return
+
+        if _suspend_timer is not None:
+            try:
+                _suspend_timer.cancel()
+            except Exception:
+                pass
+
+        _suspend_timer = threading.Timer(
+            SUSPEND_DELAY_SECONDS,
+            suspend_render_service,
+        )
+
+        _suspend_timer.daemon = True
+        _suspend_timer.start()
+
+        print(
+            f"[SUSPEND] Scheduled in "
+            f"{SUSPEND_DELAY_SECONDS}s"
+        )
+
+
+def mux_request_started():
+    global _active_mux_requests
+
+    cancel_pending_suspend()
+
+    with _active_mux_lock:
+        _active_mux_requests += 1
+
+        print(
+            "[MUX] Active requests:",
+            _active_mux_requests,
+        )
+
+
+def mux_request_finished():
+    global _active_mux_requests
+
+    with _active_mux_lock:
+        _active_mux_requests = max(
+            0,
+            _active_mux_requests - 1,
+        )
+
+        print(
+            "[MUX] Active requests:",
+            _active_mux_requests,
+        )
+
+        if _active_mux_requests == 0:
+            schedule_suspend()
+
+
+def suspend_render_service():
+    global _suspend_timer
+
+    with _active_mux_lock:
+        if _active_mux_requests != 0:
+            print(
+                "[SUSPEND] Cancelled: "
+                "mux request still active"
+            )
+            _suspend_timer = None
+            return
+
+        _suspend_timer = None
+
+    if not RENDER_API_KEY:
+        print(
+            "[SUSPEND] RENDER_API_KEY missing"
+        )
+        return
+
+    if not RENDER_SERVICE_ID:
+        print(
+            "[SUSPEND] RENDER_SERVICE_ID missing"
+        )
+        return
+
+    api_url = (
+        "https://api.render.com/v1/services/"
+        f"{RENDER_SERVICE_ID}/suspend"
+    )
+
+    req = urllib.request.Request(
+        api_url,
+        method="POST",
+        headers={
+            "Authorization": (
+                f"Bearer {RENDER_API_KEY}"
+            ),
+            "Accept": "application/json",
+        },
+    )
+
+    print("[SUSPEND] Requesting Render suspend...")
+
+    try:
+        with urllib.request.urlopen(
+            req,
+            timeout=15,
+        ) as res:
+
+            status = res.status
+
+            print(
+                "[SUSPEND] Render response:",
+                status,
+            )
+
+    except urllib.error.HTTPError as e:
+
+        body = ""
+
+        try:
+            body = e.read().decode(
+                "utf-8",
+                errors="replace",
+            )
+        except Exception:
+            pass
+
+        print(
+            "[SUSPEND] HTTP error:",
+            e.code,
+            body[:500],
+        )
+
+    except Exception as e:
+
+        print(
+            "[SUSPEND] Request failed:",
+            repr(e),
+        )
 class MuxHandler(BaseHTTPRequestHandler):
 
     server_version = "PinterestMux/2.0"
@@ -127,6 +286,10 @@ class MuxHandler(BaseHTTPRequestHandler):
         self.handle_request(head_only=True)
 
     def handle_request(self, head_only=False):
+    
+        # هر درخواست جدید، suspend در انتظار را لغو می‌کند.
+        cancel_pending_suspend()
+    
         parsed = urlparse(self.path)
 
         # ─────────────────────────────────────────────
@@ -196,8 +359,8 @@ class MuxHandler(BaseHTTPRequestHandler):
                     "error": "missing_signature",
                 },
             )
-            return
-
+                    return
+        
         if not verify_signature(
             source_url,
             exp,
@@ -212,13 +375,17 @@ class MuxHandler(BaseHTTPRequestHandler):
                 },
             )
             return
-
-        self.stream_mux(
-            source_url,
-            head_only=head_only,
-        )
-
-    def stream_mux(self, source_url, head_only=False):
+        
+        mux_request_started()
+        
+        try:
+            self.stream_mux(
+                source_url,
+                head_only=head_only,
+            )
+        finally:
+            mux_request_finished()        
+            def stream_mux(self, source_url, head_only=False):
 
         headers = (
             f"User-Agent: {USER_AGENT}\r\n"
