@@ -528,7 +528,7 @@ class MuxHandler(BaseHTTPRequestHandler):
     # FFMPEG
     # ═══════════════════════════════════════════════════════════════
 
-    def stream_mux(handler, source_hls):
+    def stream_mux(self, source_hls, head_only=False):
         temp_path = None
     
         try:
