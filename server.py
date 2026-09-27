@@ -623,7 +623,32 @@ class MuxHandler(BaseHTTPRequestHandler):
                 stderr=subprocess.PIPE,
                 text=True,
             )
-    
+            # ─────────────────────────────────────────────────────────
+            # تشخیص duration واقعی فایل تولیدشده
+            # ─────────────────────────────────────────────────────────
+            if result.returncode == 0:
+                probe = subprocess.run(
+                    [
+                        "ffprobe",
+                        "-v",
+                        "error",
+                        "-show_entries",
+                        "format=duration,size",
+                        "-show_entries",
+                        "stream=index,codec_type,duration,time_base,start_time",
+                        "-of",
+                        "json",
+                        temp_path,
+                    ],
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    text=True,
+                )
+            
+                log(
+                    "FFPROBE:",
+                    probe.stdout[:5000],
+                )    
             if result.returncode != 0:
                 error_text = (
                     result.stderr.strip()
